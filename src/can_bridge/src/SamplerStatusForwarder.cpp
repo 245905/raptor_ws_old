@@ -1,21 +1,18 @@
 #include <can_bridge/SamplerStatusForwarder.hpp>
 
-SamplerStatusForwarder::SamplerStatusForwarder(const rclcpp::NodeOptions & options) : Node("sampler_status_forwarder", options)
+SamplerStatusForwarder::SamplerStatusForwarder(rclcpp::Node::SharedPtr &nh) : mNh(nh)
 {
 	const rclcpp::QoS qos = rclcpp::QoS(rclcpp::KeepLast(256));
-
-	mSamplerStatusGrabber = this->create_subscription<can_msgs::msg::Frame>(
+	mSamplerStatusGrabber = mNh->create_subscription<can_msgs::msg::Frame>(
 		RosCanConstants::RosTopics::can_raw_RX, qos,
 		std::bind(&SamplerStatusForwarder::samplerStatusGrabber, this, std::placeholders::_1));
-
-    mSamplerStatusPublisher = this->create_publisher<rex_interfaces::msg::SamplerFeedback>(
+	mSamplerStatusPublisher = mNh->create_publisher<rex_interfaces::msg::SamplerFeedback>(
 		RosCanConstants::RosTopics::can_sampler_status, qos);
 }
 
 void SamplerStatusForwarder::samplerStatusGrabber(const can_msgs::msg::Frame::ConstSharedPtr &frame)
 {
 	auto rf = VescInterop::rosToVesc(*frame);
-	if (frame->id != 0x1E83) return;
 
 	switch (rf.command)
 	{
@@ -51,12 +48,10 @@ void SamplerStatusForwarder::statusPublisher()
 	status.ph = mStatus8.ph;
 	status.distance = mStatus8.distance;
 
-	status.header.stamp = this->now();
+	status.header.stamp = rclcpp::Clock().now();
 
 	mSamplerStatusPublisher->publish(status);
 
 	if (mStatus8Fresh)
 		mStatus8Fresh = false;
 }
-
-RCLCPP_COMPONENTS_REGISTER_NODE(SamplerStatusForwarder)

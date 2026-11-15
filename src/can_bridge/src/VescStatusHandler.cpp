@@ -1,21 +1,17 @@
 #include "can_bridge/VescStatusHandler.hpp"
 
-VescStatusHandler::VescStatusHandler(const rclcpp::NodeOptions & options) : Node("Vesc_status_handler", options)
+VescStatusHandler::VescStatusHandler(rclcpp::Node::SharedPtr &nh, const MotorControl* motorControl) : mNh(nh), mMotorControl(motorControl)
 {
 	const rclcpp::QoS qos = rclcpp::QoS(rclcpp::KeepLast(256));
 
-	mStatusGrabber = this->create_subscription<can_msgs::msg::Frame>(
+	mStatusGrabber = nh->create_subscription<can_msgs::msg::Frame>(
 		RosCanConstants::RosTopics::can_raw_RX, qos,
 		std::bind(&VescStatusHandler::statusGrabber, this, std::placeholders::_1));
 
-	mStatusPublisher = this->create_publisher<rex_interfaces::msg::VescStatus>(
+	mStatusPublisher = nh->create_publisher<rex_interfaces::msg::VescStatus>(
 		RosCanConstants::RosTopics::can_vesc_status, qos);
 
-	mSendTimer = this->create_timer(std::chrono::milliseconds(3), std::bind(&VescStatusHandler::timer_method, this));
-
-    mSetMotorVelSub = this->create_subscription<rex_interfaces::msg::Wheels>(
-            RosCanConstants::RosTopics::can_set_motor_vel,
-            qos, std::bind(&VescStatusHandler::handleSetMotorVel, this, std::placeholders::_1));
+	mSendTimer = nh->create_timer(std::chrono::milliseconds(50), std::bind(&VescStatusHandler::timer_method, this));
 }
 
 void VescStatusHandler::statusGrabber(const can_msgs::msg::Frame::ConstSharedPtr &frame)
@@ -35,13 +31,6 @@ void VescStatusHandler::statusGrabber(const can_msgs::msg::Frame::ConstSharedPtr
 		case 0x61:
 		case 0x62:
 		case 0x63:
-		//manipulator
-        case 0x70:
-        case 0x71:
-        case 0x72:
-        case 0x73:
-        case 0x74:
-        case 0x75:
 			break;
 		default:
 			return;
@@ -60,20 +49,14 @@ void VescStatusHandler::statusGrabber(const can_msgs::msg::Frame::ConstSharedPtr
 			break;
 		default:
 			return;
-    }
+	}
 
 	auto key = MotorStatusKey(vescFrame.vescID, (VESC_Command)vescFrame.command);
 	auto value = MotorStatusValue(vescFrame, frame->header.stamp);
 
 	mMotorStatus[key] = value;
 
-	auto now_time = this->now();
-    if (mMotorLastUpdates.find(key.vescId) == mMotorLastUpdates.end())
-    {
-        mMotorSendOrder.push_back(key.vescId);
-        RCLCPP_INFO(this->get_logger(), "Discovered new VESC: 0x%02X", key.vescId);
-    }
-	mMotorLastUpdates[key.vescId] = now_time;
+	mMotorLastUpdates[key.vescId] = mNh->get_clock()->now();
 }
 
 void VescStatusHandler::sendUpdate(uint8_t vescId)
@@ -82,7 +65,6 @@ void VescStatusHandler::sendUpdate(uint8_t vescId)
 
 	rex_interfaces::msg::VescStatus status;
 
-	status.vesc_id = vescId;
 	key = MotorStatusKey(vescId, VESC_COMMAND_STATUS_1);
 	if (mMotorStatus.find(key) != mMotorStatus.cend())
 	{
@@ -173,17 +155,17 @@ void VescStatusHandler::sendUpdate(uint8_t vescId)
 
 		rex_interfaces::msg::VescMotorCommand lastSentFrame;
 		
-		if(mLastSentFrame == nullptr)
+		if(mMotorControl->GetLastSentFrame() == nullptr)
 			//placeholder in case no data is sent.
 			lastSentFrame.command_id = VESC_COMMAND_STATUS_11;
 		else if(key.vescId == RosCanConstants::VescIds::front_left_stepper)
-			lastSentFrame = mLastSentFrame->front_left.turn;
+			lastSentFrame = mMotorControl->GetLastSentFrame()->front_left.turn;
 		else if(key.vescId == RosCanConstants::VescIds::front_right_stepper)
-			lastSentFrame = mLastSentFrame->front_right.turn;
+			lastSentFrame = mMotorControl->GetLastSentFrame()->front_right.turn;
 		else if(key.vescId == RosCanConstants::VescIds::rear_right_stepper)
-			lastSentFrame = mLastSentFrame->rear_right.turn;
+			lastSentFrame = mMotorControl->GetLastSentFrame()->rear_right.turn;
 		else if(key.vescId == RosCanConstants::VescIds::rear_left_stepper)
-			lastSentFrame = mLastSentFrame->rear_left.turn;
+			lastSentFrame = mMotorControl->GetLastSentFrame()->rear_left.turn;
 		
 		status.precise_pos = statusData.position;
 		status.pid_pos = statusData.position;
@@ -196,48 +178,33 @@ void VescStatusHandler::sendUpdate(uint8_t vescId)
 		else if (lastSentFrame.command_id == VESC_COMMAND_SET_POS_SPEED_LOOP)
 			status.pid_pos = lastSentFrame.set_pos_speed_loop_position;
 		else if(lastSentFrame.command_id != VESC_COMMAND_STATUS_11)
-			RCLCPP_WARN_ONCE(this->get_logger(), "Turn motor is not operated with SET_POS. Ghost wheel in RCA will be disabled.");
+			RCLCPP_WARN_ONCE(mNh->get_logger(), "Turn motor is not operated with SET_POS. Ghost wheel in RCA will be disabled.");
 	}
 
-	status.header.stamp = this->now();
+	status.vesc_id = key.vescId;
+	status.header.stamp = rclcpp::Clock().now();
 	lastSendTime = status.header.stamp;
 	mStatusPublisher->publish(status);
 }
 
 void VescStatusHandler::timer_method()
 {
-    if (mMotorSendOrder.empty())
-        return;
+	auto time_now = mNh->get_clock()->now();
 
-    // Round-robin wrap around
-    if (mSendIndex >= mMotorSendOrder.size())
-        mSendIndex = 0;
-
-    const uint8_t vescId = mMotorSendOrder[mSendIndex];
-    ++mSendIndex;
-
-    auto it = mMotorLastUpdates.find(vescId);
-    
-    if (it == mMotorLastUpdates.end())
-        return;
-    if (this->now() - it->second < rclcpp::Duration(1, 0)) {
-        sendUpdate(vescId);
-    } else {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "VESC 0x%02X is silent", vescId);
-    }
+	for(auto kvp : mMotorLastUpdates)
+	{
+		if(time_now - kvp.second < rclcpp::Duration(1, 0))
+		{
+			sendUpdate(kvp.first);
+		}
+		else
+		{
+			RCLCPP_WARN_THROTTLE(mNh->get_logger(), *mNh->get_clock(), 30000, "VescStatus for motor %d is stale", kvp.first);
+		}
+	}
 }
 
 void VescStatusHandler::clear()
 {
 	mMotorStatus.clear();
-	mMotorLastUpdates.clear();
-    mMotorSendOrder.clear();
-    mSendIndex = 0;
 }
-
-void VescStatusHandler::handleSetMotorVel(const rex_interfaces::msg::Wheels::ConstSharedPtr &msg)
-{
-    mLastSentFrame = msg;
-}
-
-RCLCPP_COMPONENTS_REGISTER_NODE(VescStatusHandler)

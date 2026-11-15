@@ -2,10 +2,9 @@
 #define BatteryInfoForwarder_h_
 
 #include "rclcpp/rclcpp.hpp"
-#include <rclcpp_components/register_node_macro.hpp>
 #include <boost/shared_ptr.hpp>
 
-#include <ros_constants/RosCanConstants.hpp>
+#include <can_bridge/RosCanConstants.hpp>
 #include <can_bridge/VescInterop.hpp>
 
 #include <can_msgs/msg/frame.hpp>
@@ -16,10 +15,10 @@ extern "C"
 #include <libVescCan/VESC.h>
 }
 
-class BatteryInfoForwarder : public rclcpp::Node
+class BatteryInfoForwarder
 {
 public:
-    BatteryInfoForwarder(const rclcpp::NodeOptions & options);
+    BatteryInfoForwarder(rclcpp::Node::SharedPtr &nh);
 
 private:
     void batteryInfoGrabber(const can_msgs::msg::Frame::ConstSharedPtr &frame);
@@ -27,11 +26,12 @@ private:
 
     void newVescBatteryInfo(VESC_Status_9 &status9);
 
+    rclcpp::Node::SharedPtr mNh;
+
+    bool mBatteryWarningIssued = false;
+
     VESC_Status_9 mBatteryInfo;
     bool mBatteryInfoFresh = false;
-
-    // unused at this moment I don't know why it exists
-    bool mBatteryWarningIssued = false;
 
     rclcpp::Subscription<can_msgs::msg::Frame>::SharedPtr mBatteryInfoGrabber;
     rclcpp::Publisher<rex_interfaces::msg::BatteryInfo>::SharedPtr mBatteryInfoPublisher;
